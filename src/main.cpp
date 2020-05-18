@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+// #include <stdio.h> 
 #include <stdlib.h>
 #include <sys/stat.h>
 
@@ -10,16 +11,48 @@
 
 #include "socket_wrap.h"
 
+#include <thread>
+#include <mutex>
+
 using std::cerr;
 using std::cout;
 using std::endl;
+
+std::mutex mutex_sock_server;
+
+void client_processing(int sock_client, int sock_server)
+{
+    cout<<"thread id = "<<std::this_thread::get_id()<<endl;
+    SocketWrap swc(sock_client);
+    char buf[1024];
+    int bytes_read;
+
+    bzero(buf, 1024);         
+    bytes_read = recv(sock_client, buf, 1024, 0);
+    if(bytes_read <= 0) 
+        return;
+    cout<<"TCP PROXY: MSG RECIVED>> "<<buf;
+    
+    // std::lock_guard<std::mutex> m_guard(mutex_sock_server);
+    mutex_sock_server.lock();
+    {
+        send(sock_server, buf, bytes_read, 0);
+        bzero(buf, 1024);
+        bytes_read = recv(sock_server, buf, 1024, 0);
+    }
+    mutex_sock_server.unlock();
+    
+    if(bytes_read <= 0) 
+        return;
+    cout<<"TCP PROXY: SERVER ANS>> "<<buf;
+
+    send(sock_client, buf, bytes_read, 0);
+}
 
 int main() 
 {
     int listener, sock_server, sock_client;
     struct sockaddr_in addr, addr_server;
-    char buf[1024];
-    int bytes_read;
 
 //##########################_Make_PROXY_############################
     listener = socket(AF_INET, SOCK_STREAM, 0);
@@ -57,35 +90,20 @@ int main()
     {
         cerr<<"Error: connecting to server"<<endl;
         return 1;
-    }   
+    }
 
 //###########################_Start_proxy_############################
     while(true)
     {
         sock_client = accept(listener, NULL, NULL);
-        SocketWrap sw3(sock_client);
         if(sock_client < 0)
         {
             cerr<<"Error: accepting from client socket"<<endl;
-            return 1;
+            continue;
         }
 
-        while(true)
-        {   
-            bzero(buf, 1024);         
-            bytes_read = recv(sock_client, buf, 1024, 0);
-            if(bytes_read <= 0) 
-                break;
-            cout<<"TCP PROXY: MSG RECIVED>> "<<buf;
-            send(sock_server, buf, bytes_read, 0);
-            
-            bzero(buf, 1024);
-            bytes_read = recv(sock_server, buf, 1024, 0);
-            if(bytes_read <= 0) 
-                break;
-            cout<<"TCP PROXY: SERVER ANS>> "<<buf;
-            send(sock_client, buf, bytes_read, 0);
-        }
+        std::thread thrd_client(client_processing, sock_client, sock_server);
+        thrd_client.detach();
     }
     
     return 0;
