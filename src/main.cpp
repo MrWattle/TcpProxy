@@ -2,7 +2,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
-// #include <stdio.h> 
 #include <stdlib.h>
 #include <sys/stat.h>
 
@@ -10,46 +9,64 @@
 #include <string.h>
 
 #include "socket_wrap.h"
+#include "tls_parser.cpp"
 
 #include <thread>
-#include <mutex>
+#include <fcntl.h>
+#include <time.h>
+
+#define BUF_SIZE 32768
 
 using std::cerr;
 using std::cout;
 using std::endl;
 
-std::mutex mutex_sock_server;
-
 void client_processing(int sock_client, int sock_server)
 {
     cout<<"thread id = "<<std::this_thread::get_id()<<endl;
     SocketWrap swc(sock_client);
-    char buf[1024];
-    int bytes_read;
+    char buf[BUF_SIZE];
+    ssize_t bytes_read, bytes_write;
+    const timespec sleep_interval{.tv_sec = 0, .tv_nsec = 10000};
 
-    bzero(buf, 1024);         
-    bytes_read = recv(sock_client, buf, 1024, 0);
-    if(bytes_read <= 0) 
-        return;
-    cout<<"TCP PROXY: MSG RECIVED>> "<<buf;
-    
-    // std::lock_guard<std::mutex> m_guard(mutex_sock_server);
-    mutex_sock_server.lock();
+    const int cl_flags = fcntl(sock_client, F_GETFL, 0);
+    fcntl(sock_client, F_SETFL, cl_flags | O_NONBLOCK);
+
+    const int sr_flags = fcntl(sock_server, F_GETFL, 0);
+    fcntl(sock_server, F_SETFL, sr_flags | O_NONBLOCK);
+
+    while (true)
     {
-        send(sock_server, buf, bytes_read, 0);
-        bzero(buf, 1024);
-        bytes_read = recv(sock_server, buf, 1024, 0);
-    }
-    mutex_sock_server.unlock();
-    
-    if(bytes_read <= 0) 
-        return;
-    cout<<"TCP PROXY: SERVER ANS>> "<<buf;
+        // Read from client -> server
+        bytes_read = read(sock_client, buf, BUF_SIZE);
+        if (bytes_read < 0)
+        {
+            if (errno != EWOULDBLOCK) {
+                std::cerr << "Error: read(sock_client)" << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            bytes_write = write(sock_server, buf, bytes_read);
+            std::cout << "client -> server : " << bytes_read << '\\' << bytes_write << std::endl;
+        }
+        // Read from server -> client
+        bytes_read = read(sock_server, buf, BUF_SIZE);
+        if (bytes_read < 0)
+        {
+            if (errno != EWOULDBLOCK) {
+                std::cerr << "Error: read(sock_server)" << std::endl;
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            bytes_write = write(sock_client, buf, bytes_read);
+            std::cout << "server -> client : " << bytes_read << '\\' << bytes_write << std::endl;
+        }
 
-    send(sock_client, buf, bytes_read, 0);
+        nanosleep(&sleep_interval, nullptr);
+    }
 }
 
-int main() 
+int main()
 {
     int listener, sock_server, sock_client;
     struct sockaddr_in addr, addr_server;
@@ -62,7 +79,7 @@ int main()
         cerr<<"Error: listener socket create"<<endl;
         return 1;
     }
-    
+
     addr.sin_family = AF_INET;
     addr.sin_port = htons(1234);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -84,15 +101,14 @@ int main()
     }
 
     addr_server.sin_family = AF_INET;
-    addr_server.sin_port = htons(3425);
-    addr_server.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr_server.sin_port = htons(443);
+    addr_server.sin_addr.s_addr = htonl((uint32_t)0x34323DBF);//52.50.61.191 (en.privatbank.ua)
     if(connect(sock_server, (struct sockaddr *)&addr_server, sizeof(addr_server)) < 0)
     {
         cerr<<"Error: connecting to server"<<endl;
         return 1;
     }
 
-//###########################_Start_proxy_############################
     while(true)
     {
         sock_client = accept(listener, NULL, NULL);
@@ -105,6 +121,6 @@ int main()
         std::thread thrd_client(client_processing, sock_client, sock_server);
         thrd_client.detach();
     }
-    
+
     return 0;
 }
